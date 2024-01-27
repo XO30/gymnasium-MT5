@@ -1,0 +1,9 @@
+pytz
+numpy
+pandas
+pathos
+scipy
+matplotlib
+plotly
+gymnasium
+MetaTrader5
