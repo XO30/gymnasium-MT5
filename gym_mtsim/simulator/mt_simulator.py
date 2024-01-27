@@ -3,7 +3,6 @@ from typing import List, Tuple, Dict, Any, Optional
 import os
 import pickle
 from datetime import datetime, timedelta
-
 import numpy as np
 import pandas as pd
 
@@ -13,11 +12,64 @@ from .exceptions import SymbolNotFound, OrderNotFound
 
 
 class MtSimulator:
+    """
+    MtSimulator is a class that simulates the MetaTrader 5 trading platform.
+
+    :param unit: str: the unit of the account
+    :param balance: float: the initial balance of the account
+    :param leverage: float: the leverage of the account
+    :param stop_out_level: float: the stop out level of the account
+    :param hedge: bool: whether the account is hedged or not
+    :param symbols_filename: Optional[str]: the filename of the symbols info and data
+
+    :ivar unit: str: the unit of the account
+    :ivar balance: float: the balance of the account
+    :ivar equity: float: the equity of the account
+    :ivar margin: float: the margin of the account
+    :ivar leverage: float: the leverage of the account
+    :ivar stop_out_level: float: the stop out level of the account
+    :ivar hedge: bool: whether the account is hedged or not
+    :ivar symbols_info: Dict[str, SymbolInfo]: the symbols info
+    :ivar symbols_data: Dict[str, pd.DataFrame]: the symbols data
+    :ivar orders: List[Order]: the list of orders
+    :ivar closed_orders: List[Order]: the list of closed orders
+    :ivar current_time: datetime: the current time
+
+    :method download_data: method to download historical data for a list of symbol names
+    :method save_symbols: method to save symbols info and data to a file
+    :method load_symbols: method to load symbols info and data from a file
+    :method tick: method to update the simulator state
+    :method nearest_time: method to get the nearest time in the symbol data
+    :method price_at: method to get the price at a specific time
+    :method symbol_orders: method to get all orders for a symbol
+    :method create_order: method to create an order
+    :method close_order: method to close an order
+    :method get_state: method to get the simulator state
+
+    :private method _create_hedged_order: private method to create a hedged order
+    :private method _create_unhedged_order: private method to create an unhedged order
+    :private method _update_order_profit: private method to update the profit of an order
+    :private method _update_order_margin: private method to update the margin of an order
+    :private method _get_unit_ratio: private method to get the unit ratio of a symbol at a specific time
+    :private method _get_unit_symbol_info: private method to get the symbol info of a unit symbol
+    :private method _check_current_time: private method to check if the current time has a value
+    :private method _check_volume: private method to check if the volume is valid
+
+    :raises FileNotFoundError: if the symbols file is not found
+    :raises ValueError: if the fee is negative, if the free margin is low, if the volume is not valid
+    :raises SymbolNotFound: if the unit symbol is not found
+    :raises OrderNotFound: if the order is not found in the order list
+    """
 
     def __init__(
-            self, unit: str='USD', balance: float=10000., leverage: float=100.,
-            stop_out_level: float=0.2, hedge: bool=True, symbols_filename: Optional[str]=None
-        ) -> None:
+            self,
+            unit: str = 'USD',
+            balance: float = 10000.,
+            leverage: float = 100.,
+            stop_out_level: float = 0.2,
+            hedge: bool = True,
+            symbols_filename: Optional[str] = None
+    ) -> None:
 
         self.unit = unit
         self.balance = balance
@@ -40,20 +92,36 @@ class MtSimulator:
 
     @property
     def free_margin(self) -> float:
+        """
+        property method to calculate free margin
+        :return: float: free margin
+        """
+
         return self.equity - self.margin
 
 
     @property
     def margin_level(self) -> float:
+        """
+        property method to calculate margin level
+        :return: float: margin level
+        """
+
         margin = round(self.margin, 6)
         if margin == 0.:
             return float('inf')
         return self.equity / margin
 
 
-    def download_data(
-            self, symbols: List[str], time_range: Tuple[datetime, datetime], timeframe: Timeframe
-        ) -> None:
+    def download_data(self, symbols: List[str], time_range: Tuple[datetime, datetime], timeframe: Timeframe) -> None:
+        """
+        method to download historical data for a list of symbol names
+        :param symbols: List[str]: list of symbols
+        :param time_range: Tuple[datetime, datetime]: time range
+        :param timeframe: Timeframe: timeframe
+        :return: None
+        """
+
         from_dt, to_dt = time_range
         for symbol in symbols:
             si, df = retrieve_data(symbol, from_dt, to_dt, timeframe)
@@ -62,11 +130,23 @@ class MtSimulator:
 
 
     def save_symbols(self, filename: str) -> None:
+        """
+        method to save symbols info and data to a file
+        :param filename: str: filename
+        :return: None
+        """
+
         with open(filename, 'wb') as file:
             pickle.dump((self.symbols_info, self.symbols_data), file)
 
 
     def load_symbols(self, filename: str) -> bool:
+        """
+        method to load symbols info and data from a file
+        :param filename: str: filename
+        :return: bool: True if the file exists, False otherwise
+        """
+
         if not os.path.exists(filename):
             return False
         with open(filename, 'rb') as file:
@@ -74,20 +154,28 @@ class MtSimulator:
         return True
 
 
-    def tick(self, delta_time: timedelta=timedelta()) -> None:
+    def tick(self, delta_time: timedelta = timedelta()) -> None:
+        """
+        method to update the simulator state
+        :param delta_time: timedelta: time delta
+        :return: None
+        """
+
         self._check_current_time()
 
         self.current_time += delta_time
         self.equity = self.balance
 
+        # update all orders
         for order in self.orders:
             order.exit_time = self.current_time
             order.exit_price = self.price_at(order.symbol, order.exit_time)['Close']
             self._update_order_profit(order)
             self.equity += order.profit
 
+        # close most unprofitable orders until margin level is above stop out level
         while self.margin_level < self.stop_out_level and len(self.orders) > 0:
-            most_unprofitable_order = min(self.orders, key=lambda order: order.profit)
+            most_unprofitable_order = min(self.orders, key=lambda o: o.profit)
             self.close_order(most_unprofitable_order)
 
         if self.balance < 0.:
@@ -96,6 +184,13 @@ class MtSimulator:
 
 
     def nearest_time(self, symbol: str, time: datetime) -> datetime:
+        """
+        method to get the nearest time in the symbol data
+        :param symbol: str: symbol name
+        :param time: datetime: time
+        :return: datetime: nearest time
+        """
+
         df = self.symbols_data[symbol]
         if time in df.index:
             return time
@@ -107,19 +202,41 @@ class MtSimulator:
 
 
     def price_at(self, symbol: str, time: datetime) -> pd.Series:
+        """
+        method to get the price at a specific time
+        :param symbol: str: symbol name
+        :param time: datetime: time
+        :return: pd.Series: price
+        """
+
         df = self.symbols_data[symbol]
         time = self.nearest_time(symbol, time)
         return df.loc[time]
 
 
     def symbol_orders(self, symbol: str) -> List[Order]:
+        """
+        method to get all orders for a symbol
+        :param symbol: str: symbol name
+        :return: List[Order]: list of orders
+        """
+
         symbol_orders = list(filter(
-            lambda order: order.symbol == symbol, self.orders
+            lambda o: o.symbol == symbol, self.orders
         ))
         return symbol_orders
 
 
-    def create_order(self, order_type: OrderType, symbol: str, volume: float, fee: float=0.0005) -> Order:
+    def create_order(self, order_type: OrderType, symbol: str, volume: float, fee: float = 0.0005) -> Order:
+        """
+        method to create an order
+        :param order_type: OrderType: order type
+        :param symbol: str: symbol name
+        :param volume: float: volume
+        :param fee: float: fee
+        :return: Order: order
+        """
+
         self._check_current_time()
         self._check_volume(symbol, volume)
         if fee < 0.:
@@ -131,6 +248,15 @@ class MtSimulator:
 
 
     def _create_hedged_order(self, order_type: OrderType, symbol: str, volume: float, fee: float) -> Order:
+        """
+        private method to create a hedged order
+        :param order_type: OrderType: order type
+        :param symbol: str: symbol name
+        :param volume: float: volume
+        :param fee: float: fee
+        :return: Order: order
+        """
+
         order_id = len(self.closed_orders) + len(self.orders) + 1
         entry_time = self.current_time
         entry_price = self.price_at(symbol, entry_time)['Close']
@@ -157,7 +283,16 @@ class MtSimulator:
 
 
     def _create_unhedged_order(self, order_type: OrderType, symbol: str, volume: float, fee: float) -> Order:
-        if symbol not in map(lambda order: order.symbol, self.orders):
+        """
+        private method to create an unhedged order
+        :param order_type: OrderType: order type
+        :param symbol: str: symbol name
+        :param volume: float: volume
+        :param fee: float: fee
+        :return: Order: order
+        """
+
+        if symbol not in map(lambda o: o.symbol, self.orders):
             return self._create_hedged_order(order_type, symbol, volume, fee)
 
         old_order: Order = self.symbol_orders(symbol)[0]
@@ -180,10 +315,10 @@ class MtSimulator:
             return old_order
 
         if volume >= old_order.volume:
-             self.close_order(old_order)
-             if volume > old_order.volume:
-                 return self._create_hedged_order(order_type, symbol, volume - old_order.volume, fee)
-             return old_order
+            self.close_order(old_order)
+            if volume > old_order.volume:
+                return self._create_hedged_order(order_type, symbol, volume - old_order.volume, fee)
+            return old_order
 
         partial_profit = (volume / old_order.volume) * old_order.profit
         partial_margin = (volume / old_order.volume) * old_order.margin
@@ -199,6 +334,12 @@ class MtSimulator:
 
 
     def close_order(self, order: Order) -> float:
+        """
+        method to close an order
+        :param order: Order: order to close
+        :return: float: profit
+        """
+
         self._check_current_time()
         if order not in self.orders:
             raise OrderNotFound("order not found in the order list")
@@ -217,6 +358,11 @@ class MtSimulator:
 
 
     def get_state(self) -> Dict[str, Any]:
+        """
+        method to get the simulator state
+        :return: Dict[str, Any]: simulator state
+        """
+
         orders = []
         for order in reversed(self.closed_orders + self.orders):
             orders.append({
@@ -247,6 +393,12 @@ class MtSimulator:
 
 
     def _update_order_profit(self, order: Order) -> None:
+        """
+        private method to update the profit of an order
+        :param order: Order: order
+        :return: None
+        """
+
         diff = order.exit_price - order.entry_price
         v = order.volume * self.symbols_info[order.symbol].trade_contract_size
         local_profit = v * (order.type.sign * diff - order.fee)
@@ -254,6 +406,12 @@ class MtSimulator:
 
 
     def _update_order_margin(self, order: Order) -> None:
+        """
+        private method to update the margin of an order
+        :param order: Order: order
+        :return: None
+        """
+
         v = order.volume * self.symbols_info[order.symbol].trade_contract_size
         local_margin = (v * order.entry_price) / self.leverage
         local_margin *= self.symbols_info[order.symbol].margin_rate
@@ -261,6 +419,13 @@ class MtSimulator:
 
 
     def _get_unit_ratio(self, symbol: str, time: datetime) -> float:
+        """
+        private method to get the unit ratio of a symbol at a specific time
+        :param symbol: str: symbol name
+        :param time: datetime: time
+        :return: float: unit ratio
+        """
+
         symbol_info = self.symbols_info[symbol]
         if self.unit == symbol_info.currency_profit:
             return 1.
@@ -281,6 +446,12 @@ class MtSimulator:
 
 
     def _get_unit_symbol_info(self, currency: str) -> Optional[SymbolInfo]:  # Unit/Currency or Currency/Unit
+        """
+        private method to get the symbol info of a unit symbol
+        :param currency: str: currency name
+        :return: None or SymbolInfo: symbol info
+        """
+
         for info in self.symbols_info.values():
             if currency in info.currencies and self.unit in info.currencies:
                 return info
@@ -288,11 +459,23 @@ class MtSimulator:
 
 
     def _check_current_time(self) -> None:
+        """
+        private method to check if the current time has a value
+        :return: None
+        """
+
         if self.current_time is NotImplemented:
             raise ValueError("'current_time' must have a value")
 
 
     def _check_volume(self, symbol: str, volume: float) -> None:
+        """
+        private method to check if the volume is valid
+        :param symbol: str: symbol name
+        :param volume: float: volume
+        :return: None
+        """
+
         symbol_info = self.symbols_info[symbol]
         if not (symbol_info.volume_min <= volume <= symbol_info.volume_max):
             raise ValueError(

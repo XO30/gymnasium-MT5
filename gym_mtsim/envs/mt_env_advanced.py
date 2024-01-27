@@ -3,9 +3,9 @@ import copy
 from pathos.multiprocessing import ProcessingPool as Pool
 import numpy as np
 import matplotlib.pyplot as plt
-import gym
-from gym import spaces
-from gym.utils import seeding
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 from ..simulator import MtSimulator, OrderType
 from ta import add_all_ta_features
 import pandas as pd
@@ -76,7 +76,7 @@ class MtEnvAdvanced(gym.Env):
         return [seed]
 
 
-    def reset(self) -> Dict[str, np.ndarray]:
+    def reset(self, seed=None, options=None) -> Dict[str, np.ndarray]:
         self._done = False
         self._current_tick = self._start_tick
         self.simulator = copy.deepcopy(self.original_simulator)
@@ -87,13 +87,13 @@ class MtEnvAdvanced(gym.Env):
             margin=[self.simulator.margin],
             orders=list(),
         )
-        return self._get_observation()
+        return self._get_observation(), {}
 
 
     def step(self, action: np.ndarray) -> any:
-        order = self._apply_action(action)
-        if order is not None:
-            self.history['orders'].append(order)
+        orders = self._apply_action(action)
+        if orders is not None:
+            self.history['orders'].append(orders)
 
         self._current_tick += 1
         if self._current_tick == self._end_tick:
@@ -113,7 +113,7 @@ class MtEnvAdvanced(gym.Env):
         if observation['equity'] <= 0:
             self._done = True
 
-        return observation, step_reward, self._done, self.history
+        return observation, step_reward, self._done, False, self.history
 
 
     def _apply_action(self, action: np.ndarray) -> any:
@@ -244,13 +244,6 @@ class MtEnvAdvanced(gym.Env):
                                 gewicht_verlustvermeidung * belohnung_verlustvermeidung
 
         return kombinierte_belohnung
-
-    def _calculate_reward(self) -> float:
-        prev_equity = self.history['equity'][-1]
-        current_equity = self.simulator.equity
-        step_reward = current_equity - prev_equity
-        r = 1 if step_reward > 0 else -1
-        return r
 
     def render(self, mode='human'):
         if mode not in self.metadata['render.modes']:
