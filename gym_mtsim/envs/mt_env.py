@@ -9,6 +9,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.utils import seeding
 from ..simulator import MtSimulator, OrderType
+import ta
+import pandas as pd
 
 
 class MtEnv(gym.Env):
@@ -36,25 +38,36 @@ class MtEnv(gym.Env):
         self._start_tick = self.window_size - 1
         self._end_tick = len(self.time_points) - 1
 
-        self.signal_features = NotImplemented
-        self.features_shape = NotImplemented
-        self._done = NotImplemented
-        self._current_tick = NotImplemented
-        self.simulator = NotImplemented
-        self.history = NotImplemented
-        self.action_space = NotImplemented
-        self.observation_space = NotImplemented
+        # Set up features and simulator state
+        self.signal_features = np.zeros((self._end_tick, len(self.trading_symbols)))  # Example
+        self.features_shape = (self.window_size, len(self.trading_symbols))  # Adjust based on features
+        self._done = False
+        self._current_tick = self._start_tick
+        self.simulator = copy.deepcopy(self.original_simulator)
+        self.history = {
+            'balance': [],
+            'equity': [],
+            'margin': [],
+            'orders': [],
+        }
+
+        # Call build_spaces to initialize the action and observation spaces
+        self.build_spaces()
 
     def build_spaces(self):
+        # Define the action space (continuous action space in this case)
         self.action_space = spaces.Box(low=-100, high=100, shape=(len(self.trading_symbols),), dtype=np.float64)
+
+        # Define the observation space using the previously calculated feature shape
         INF = np.inf
         self.observation_space = spaces.Dict({
             'balance': spaces.Box(low=-INF, high=INF, shape=(1,), dtype=np.float64),
             'equity': spaces.Box(low=-INF, high=INF, shape=(1,), dtype=np.float64),
             'margin': spaces.Box(low=-INF, high=INF, shape=(1,), dtype=np.float64),
-            'features': spaces.Box(low=-INF, high=INF, shape=self.features_shape, dtype=np.float64),
+            'features': spaces.Box(low=-INF, high=INF, shape=self.features_shape, dtype=np.float64),  # Correct shape
             'orders': spaces.Box(low=-INF, high=INF, shape=(len(self.trading_symbols),), dtype=np.float64)
         })
+
 
     def add_signal_features(self, features: np.ndarray):
         self.signal_features = features
@@ -134,13 +147,44 @@ class MtEnv(gym.Env):
     def _get_prices(self, keys: List[str] = ['Open', 'Close', 'High', 'Low', 'Volume']) -> Dict[str, np.ndarray]:
         prices = {}
         for symbol in self.trading_symbols:
-            get_price_at = lambda time: \
-                self.original_simulator.price_at(symbol, time)[keys]
+            get_price_at = lambda time: self.original_simulator.price_at(symbol, time)[keys]
+            
+            # Hole die OHCL-Daten für die jeweiligen Zeitpunkte
             if self.multiprocessing_pool is None:
-                p = list(map(get_price_at, self.time_points))
+                ohcl_data = list(map(get_price_at, self.time_points))
             else:
-                p = self.multiprocessing_pool.map(get_price_at, self.time_points)
-            prices[symbol] = np.array(p)
+                ohcl_data = self.multiprocessing_pool.map(get_price_at, self.time_points)
+
+            # Konvertiere die OHCL-Daten in ein DataFrame
+            data = pd.DataFrame(ohcl_data, columns=keys)
+
+            # Berechne die prozentuale Änderung für 'Close'
+            data['ppc_close'] = ppc(data['Close'])
+
+            # Berechne die gleitenden Durchschnitte (Moving Averages) auf Basis von 'ppc_close'
+            data['ma_10'] = ppc(ta.trend.sma_indicator(data['ppc_close'], 10).fillna(0).tolist())
+            data['ma_20'] = ppc(ta.trend.sma_indicator(data['ppc_close'], 20).fillna(0).tolist())
+            data['ma_50'] = ppc(ta.trend.sma_indicator(data['ppc_close'], 50).fillna(0).tolist())
+
+            # Bollinger-Bänder auf Basis von 'ppc_close' berechnen
+            bb = ta.volatility.BollingerBands(data['ppc_close'], 20, 2)
+            data['bb_bbm'] = ppc(bb.bollinger_mavg().fillna(0).tolist())
+            data['bb_bbh'] = ppc(bb.bollinger_hband().fillna(0).tolist())
+            data['bb_bbl'] = ppc(bb.bollinger_lband().fillna(0).tolist())
+
+            # RSI bleibt unverändert (kein direkter Preisbezug)
+            data['rsi'] = ta.momentum.rsi(data['Close'], 14)
+
+            # CCI bleibt unverändert (kein direkter Preisbezug)
+            data['cci'] = ta.trend.cci(data['High'], data['Low'], data['Close'], 20)
+
+            # ADX bleibt unverändert (kein direkter Preisbezug)
+            data['adx'] = ta.trend.adx(data['High'], data['Low'], data['Close'], 14)
+            
+            data.fillna(0, inplace=True)
+
+            # Entferne die ursprünglichen OHCL-Daten und speichere nur die berechneten Features
+            prices[symbol] = data[['ppc_close', 'ma_10', 'ma_20', 'ma_50', 'bb_bbm', 'bb_bbh', 'bb_bbl', 'rsi', 'cci', 'adx']].to_numpy()
         return prices
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
@@ -202,6 +246,7 @@ class MtEnv(gym.Env):
 
         return kombinierte_belohnung
 
+
     def render(self, mode='human'):
         if mode not in self.metadata['render.modes']:
             raise Exception(f"Render mode {mode} not supported. Choose from {self.metadata['render.modes']}")
@@ -238,3 +283,16 @@ class MtEnv(gym.Env):
 
     def close(self) -> None:
         plt.close()
+
+def ppc(d: List[float]) -> List[Optional[float]]:
+    data = list(d.copy())
+    res = []
+    for i in range(len(data)):
+        if i == 0:
+            res.append(None)
+        else:
+            if data[i-1] == 0:
+                res.append(None)
+            else:
+                res.append((data[i] - data[i-1]) / data[i-1])
+    return res
